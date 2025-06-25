@@ -1,0 +1,6 @@
+# python
+__pycache__/
+*.pyc
+
+data/t_comp_rb_no_cuts_all_fields.fits
+
