@@ -56,16 +56,27 @@ conda activate popsycle
 
 The final output table contains the following key columns with their corresponding units:
 
-| Column Name | Units | Description |
-| :--- | :--- | :--- |
-| `M_L` | Solar Masses ($M_\odot$) | Mass of the primary lens star. |
-| `D_L_kpc` | Kiloparsecs (kpc) | Distance to the lens. |
-| `D_S_kpc` | Kiloparsecs (kpc) | Distance to the source. |
-| `mu_rel_mas_yr`| Milliarcseconds/year | Relative lens-source proper motion. |
-| `theta_E_mas` | Milliarcseconds (mas) | Einstein radius of the lensing event. |
-| `binary_sep_arcsec`| Arcseconds (") | Projected angular separation of the source binary. |
-| `gal_lon_S_deg`| Degrees | Galactic longitude of the source. |
-| `gal_lat_S_deg`| Degrees | Galactic latitude of the source. |
+| Your Column Name      | Original Column(s)        | Units                                         |
+| :-------------------- | :------------------------ | :-------------------------------------------- |
+| `M_L`                 | `mass_L`                  | Solar Masses ($M_\odot$)                      |
+| `D_L_kpc`             | `px_L`, `py_L`, `pz_L`    | Kiloparsecs (kpc)                             |
+| `D_S_kpc`             | `px_S`, `py_S`, `pz_S`    | Kiloparsecs (kpc)                             |
+| `mu_rel_mas_yr`       | `mu_rel`                  | Milliarcseconds per year (mas/yr)             |
+| `theta_E_mas`         | `theta_E`                 | Milliarcseconds (mas)                         |
+| `u0`                  | `u0`                      | $\theta_E$                                    |
+| `binary_sep_au`       | `comp_S_sep`              | Projected separation (AU)                     |
+| `binary_log_a_au`     | `comp_S_log_a`            | log10(semi-major axis/AU)                     |
+| `binary_a_au`         | `comp_S_log_a`            | Semi-major axis (AU)                          |
+| `binary_alpha_deg`    | `comp_S_alpha`            | Orientation angle (deg)                       |
+| `binary_phi_deg`      | `comp_S_phi`              | Phase angle (deg)                             |
+| `binary_sep_arcsec`   | `comp_S_sep`, `D_S`       | Projected separation (arcsec)                 |
+| `gal_lon_S_deg`       | `glon_S`                  | Galactic longitude (deg)                      |
+| `gal_lat_S_deg`       | `glat_S`                  | Galactic latitude (deg)                       |
+| `I_S`                 | `ubv_I_S`                 | Source I-band magnitude                       |
+| `mu_b_L`              | `mu_b_L`                  | Lens proper motion in b direction (mas/yr)    |
+| `mu_lcosb_L`          | `mu_lcosb_L`              | Lens proper motion in l*cos(b) (mas/yr)       |
+| `mu_b_S`              | `mu_b_S`                  | Source proper motion in b direction (mas/yr)  |
+| `mu_lcosb_S`          | `mu_lcosb_S`              | Source proper motion in l*cos(b) (mas/yr)     |
 
 You can easily load and begin working with this table using Pandas:
 
