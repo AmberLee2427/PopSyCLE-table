@@ -73,6 +73,7 @@ The final output table contains the following key columns with their correspondi
 | `gal_lon_S_deg`       | `glon_S`                  | Galactic longitude (deg)                      |
 | `gal_lat_S_deg`       | `glat_S`                  | Galactic latitude (deg)                       |
 | `I_S`                 | `ubv_I_S`                 | Source I-band magnitude                       |
+| `I_S2`                | `comp_S_m_ubv_I`          | Source companion I-band magnitude             |
 | `mu_b_L`              | `mu_b_L`                  | Lens proper motion in b direction (mas/yr)    |
 | `mu_lcosb_L`          | `mu_lcosb_L`              | Lens proper motion in l*cos(b) (mas/yr)       |
 | `mu_b_S`              | `mu_b_S`                  | Source proper motion in b direction (mas/yr)  |
