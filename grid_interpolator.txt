@@ -1,0 +1,184 @@
+# grid_interpolator.ipynb
+
+```markdown
+# ModelGridInterpolator
+
+In practice, interaction with the model grid and bolometric correction objects is easiest through a `ModelGridInterpolator` object, which brings the two together.  This object is the replacement of the `Isochrone` object from previous generations of this package, though it has a slightly different API.  It is mostly backward compatible, except for the removal of the `.mag` function dictionary for interpolating apparent magnitudes, this being replaced by the `.interp_mag` method.
+```
+
+```markdown
+## Isochrones
+```
+
+```markdown
+An `IsochroneInterpolator` object takes `[EEP, log(age), feh]` as parameters.
+```
+
+```python
+from isochrones.mist import MIST_Isochrone
+
+mist = MIST_Isochrone()
+
+pars = [353, 9.78, -1.24]  # eep, log(age), feh
+mist.interp_value(pars, ['mass', 'radius', 'Teff'])
+```
+
+```markdown
+To interpolate apparent magnitudes, add distance [pc] and $A_V$ extinction as parameters.
+```
+
+```python
+mist.interp_mag(pars + [200, 0.11], ['K', 'BP', 'RP'])  # Returns Teff, logg, feh, mags
+```
+
+```markdown
+## Evolution tracks
+
+Note that you can do the same using an `EvolutionTrackInterpolator` rather than an isochrone grid, using `[mass, EEP, feh]` as parameters:
+```
+
+```python
+from isochrones.mist import MIST_EvolutionTrack
+
+mist_track = MIST_EvolutionTrack()
+
+pars = [0.794, 353, -1.24]  # mass, eep, feh [matching above]
+mist_track.interp_value(pars, ['mass', 'radius', 'Teff', 'age'])
+```
+
+```python
+mist_track.interp_mag(pars + [200, 0.11], ['K', 'BP', 'RP'])
+```
+
+```markdown
+There are also convenience methods (for both isochrones and tracks) if you prefer (and for backward compatibility---note that the parameters must be unpacked, unlike the calls to `.interp_value` and `.interp_mag`), though it is slower to call multiple of these than to call `.interp_value` once with several desired outputs:
+```
+
+```python
+mist_track.mass(*pars)
+```
+
+```markdown
+You can also get the dataframe of a single isochrone (interpolated to any age or metallicity) as follows:
+```
+
+```python
+mist.isochrone(9.53, 0.1).head()  # just show first few rows
+```
+
+```markdown
+## Generating synthetic properties
+
+Often one wants to use stellar model grids to generate synthetic properties of stars.  This can be done in a couple different ways, depending on what information you are able to provide.  If you happen to have EEP values, you can use the fact that a `ModelGridInterpolator` is callable.  Note that it takes the same parameters as all the other interpolation calls, with `distance` and `AV` as optional keyword parameters.
+```
+
+```python
+from isochrones.mist import MIST_EvolutionTrack
+
+mist_track = MIST_EvolutionTrack()
+mist_track([0.8, 0.9, 1.0], 350, 0.0, distance=100, AV=0.1)
+```
+
+```markdown
+Often, however, you will not know the EEP values at which you wish to simulate your synthetic population.  In this case, you can use the `.generate()` method.
+```
+
+```python
+mist_track.generate([0.81, 0.91, 1.01], 9.51, 0.01)
+```
+
+```markdown
+Under the hood, `.generate()` uses an interpolation step to approximate the eep value(s) corresponding to the requested value(s) of mass, age, and metallicity:
+```
+
+```python
+mist_track.get_eep(1.01, 9.51, 0.01)
+```
+
+```markdown
+Because this is fast, it is pretty inexpensive to generate a population of stars with given properties:
+```
+
+```python
+import numpy as np
+
+N = 10000
+mass = np.ones(N) * 1.01
+age = np.ones(N) * 9.82
+feh = np.ones(N) * 0.02
+%timeit mist_track.generate(mass, age, feh)
+```
+
+```markdown
+Note though, that this interpolation doesn't do great for evolved stars (this is the fundamental reason why **isochrones** always fits with EEP as one of the parameters).  However, if you do want to compute more precise EEP values for given physical properties, you can set the `accurate` keyword parameter, which performs a function minimization:
+```
+
+```python
+mist_track.get_eep(1.01, 9.51, 0.01, accurate=True)
+```
+
+```markdown
+This is more accurate, but slow because it is actually performing a function minimization:
+```
+
+```python
+%timeit mist_track.get_eep(1.01, 9.51, 0.01, accurate=True)
+%timeit mist_track.get_eep(1.01, 9.51, 0.01)
+```
+
+```markdown
+Here we can see the effect of accuracy by plugging back in the estimated EEP into the interpolation:
+```
+
+```python
+[mist_track.interp_value([1.01, e, 0.01], ['age']) for e in [343.8, 343.1963539123535]]
+```
+
+```markdown
+So if accuracy is required, definitely use `accurate=True`, but for most purposes, the default should be fine.  You can request that `.generate()` run in "accurate" mode, which uses this more expensive EEP computation (it will be correspondingly slower).
+```
+
+```python
+mist_track.generate([0.81, 0.91, 1.01], 9.51, 0.01, accurate=True)
+```
+
+```markdown
+Just for curiosity, let's look at the difference in the predictions:
+```
+
+```python
+df0 = mist_track.generate([0.81, 0.91, 1.01], 9.51, 0.01, accurate=True)
+df1 = mist_track.generate([0.81, 0.91, 1.01], 9.51, 0.01)
+((df1 - df0) / df0).mean()
+```
+
+```markdown
+Not too bad, for this example!  
+```
+
+```markdown
+## Demo: Visualize
+
+Now let's make sure that interpolated isochrones fall nicely between ones that are actually part of the grid.  In order to execute this code, you will need to 
+    
+    conda install -c pyviz pyviz
+    
+and to execute in JupyterLab, you will need to
+
+    jupyter labextension install @pyviz/jupyterlab_pyviz
+
+```
+
+```python
+import hvplot.pandas
+
+iso1 = mist.model_grid.df.xs((9.5, 0.0), level=(0, 1))   # extract subgrid at log_age=9.5, feh=0.0
+iso2 = mist.model_grid.df.xs((9.5, 0.25), level=(0, 1))  # extract subgrid at log_age=9.5, feh=0.25
+iso3 = mist.isochrone(9.5, 0.12)  # should be between the other two
+
+plot1 = iso1.hvplot.line('logTeff', 'logL', label='[Fe/H] = 0.0') 
+plot2 = iso2.hvplot.line('logTeff', 'logL', label='[Fe/H] = 0.25') 
+plot3 = iso3.hvplot.line('logTeff', 'logL', label='[Fe/H] = 0.12')
+
+(plot1 * plot2 * plot3).options(invert_xaxis=True, legend_position='bottom_left', width=600)
+```

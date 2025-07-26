@@ -9,9 +9,6 @@ dependencies:
   - numpy<2.3
   - matplotlib
   - pandas
-  - synphot
-  - speclite
-  - astroquery
-  - numba
+  - ipykernel
   - pip:
     - isochrones

@@ -1,0 +1,701 @@
+# make_database.ipynb
+
+```markdown
+# Making a Database for Catherine out of the PopSyCLE Data with Natasha's OGLE cuts
+
+
+> Here's the table with mock-OGLE EWS cuts implemented. The fields are merged and I also added in the companion parameters into this table for convenience. This is the `all_fields_Mrun_EWS_w_comp_params.fits` file.
+>
+> The columns of the event table are described here [https://popsycle.readthedocs.io/en/latest/source/popsycle_docs.html](https://popsycle.readthedocs.io/en/latest/source/popsycle_docs.html) (see the `event_table` description in `calc_events`, `refine_events`, and `refine_binary_events`). There's now also all the columns from the companion tables added. All the values for the binary lens companions are `comp_L_<column>` and for the source `comp_S_<column>` in the attached event table. If there's no companion the values are all set to `nan`.
+>
+> Note that we actually do include triples in a rudimentary way, but the companion parameters that are chosen for each lens and source here are the companion that corresponded to the lightcurve with the highest bump magnitude (`delta_m`). If you want the full detail of the companions and the lightcurves simulated, I attached the uncut companion and lightcurve tables. (see section 2.2.5 and Appendix B and C for details [https://ui.adsabs.harvard.edu/abs/2025ApJ...980..103A/abstract](https://ui.adsabs.harvard.edu/abs/2025ApJ...980..103A/abstract)).
+> 
+> Note also that since there are multiple fields combined here that the `obj_id_L`, `obj_id_S`, and `companion_ids` are no longer unique. You need to cross reference with the `field_id` column if you want to combine the tables.
+> 
+> I know this can be a bit complicated/confusing, so let me know if you have more questions!
+>
+> Best,
+>
+> Natasha
+
+```
+
+```python
+import pandas as pd
+from astropy.io import fits
+import numpy as np
+from astropy.table import Table
+import astropy.units as u
+# You'll need to install these libraries
+import synphot
+from synphot import SourceSpectrum, Observation, SpectralElement
+from synphot.models import Empirical1D
+from synphot.units import VEGAMAG
+from astroquery.svo_fps import SvoFps
+from isochrones.mist import MIST_Isochrone
+
+# Initialize the isochrone model globally to avoid re-loading it every time.
+# The first time this script runs, it may need to download data, which can be slow.
+print("Initializing MIST isochrone models...")
+mist = MIST_Isochrone()
+print("MIST models loaded.")
+```
+
+```markdown
+## Load the `all_fields_Mrun_EWS_w_comp_params.fits` file
+```
+
+```python
+# Path to your FITS file
+fits_file = 'data/all_fields_Mrun_EWS_w_comp_params.fits'
+
+with fits.open(fits_file) as hdul:
+    hdul.info()
+    data = hdul[1].data
+    # Convert to numpy array and change byte order to native (little-endian)
+    data_array = np.array(data).byteswap().view(data.dtype.newbyteorder('='))
+    df = pd.DataFrame(data_array)
+
+df.head()
+```
+
+```python
+col_string = ', '.join(f'`{col}`' for col in df.columns)
+
+with open('data/column_names.txt', 'w') as f:
+    f.write(col_string)
+```
+
+```markdown
+**Column names:**
+
+`obj_id_L`, `obj_id_S`, `age_L`, `popid_L`, `zams_mass_L`, `mass_L`, `systemMass_L`, `px_L`, `py_L`, `pz_L`, `vx_L`, `vy_L`, `vz_L`, `exbv_L`, `glat_L`, `glon_L`, `mbol_L`, `grav_L`, `teff_L`, `feh_L`, `rad_L`, `isMultiple_L`, `N_companions_L`, `rem_id_L`, `ubv_J_L`, `ubv_H_L`, `ubv_K_L`, `ubv_U_L`, `ubv_I_L`, `ubv_B_L`, `ubv_V_L`, `ubv_R_L`, `vr_L`, `mu_b_L`, `mu_lcosb_L`, `sep_L`, `age_S`, `popid_S`, `zams_mass_S`, `mass_S`, `systemMass_S`, `px_S`, `py_S`, `pz_S`, `vx_S`, `vy_S`, `vz_S`, `exbv_S`, `glat_S`, `glon_S`, `mbol_S`, `grav_S`, `teff_S`, `feh_S`, `rad_S`, `isMultiple_S`, `N_companions_S`, `rem_id_S`, `ubv_J_S`, `ubv_H_S`, `ubv_K_S`, `ubv_U_S`, `ubv_I_S`, `ubv_B_S`, `ubv_V_S`, `ubv_R_S`, `vr_S`, `mu_b_S`, `mu_lcosb_S`, `sep_S`, `theta_E`, `u0`, `mu_rel`, `t0`, `t_E`, `ubv_I_app_S`, `ubv_I_app_L`, `cent_glon_I_N`, `cent_glat_I_N`, `ubv_I_app_N`, `ubv_I_app_LSN`, `delta_m_I`, `f_blend_I`, `pi_rel`, `pi_E`, `pps_seed`, `gal_seed`, `n_peaks`, `bin_delta_m`, `tE_sys`, `tE_primary`, `primary_t`, `avg_t`, `std_t`, `asymmetry`, `companion_idx_list`, `field_id`, `observable_n_peaks`, `comp_L_zams_mass`, `comp_L_Teff`, `comp_L_L`, `comp_L_logg`, `comp_L_isWR`, `comp_L_mass`, `comp_L_phase`, `comp_L_metallicity`, `comp_L_m_ubv_U`, `comp_L_m_ubv_B`, `comp_L_m_ubv_V`, `comp_L_m_ubv_I`, `comp_L_m_ubv_R`, `comp_L_m_ukirt_H`, `comp_L_m_ukirt_K`, `comp_L_m_ukirt_J`, `comp_L_m_ztf_g`, `comp_L_m_ztf_r`, `comp_L_m_ztf_i`, `comp_L_log_a`, `comp_L_e`, `comp_L_i`, `comp_L_Omega`, `comp_L_omega`, `comp_L_q`, `comp_L_sep`, `comp_L_P`, `comp_L_obj_id_L`, `comp_L_obj_id_S`, `comp_L_alpha`, `comp_L_phi_pi_E`, `comp_L_phi`, `comp_L_companion_idx`, `comp_S_zams_mass`, `comp_S_Teff`, `comp_S_L`, `comp_S_logg`, `comp_S_isWR`, `comp_S_mass`, `comp_S_phase`, `comp_S_metallicity`, `comp_S_m_ubv_U`, `comp_S_m_ubv_B`, `comp_S_m_ubv_V`, `comp_S_m_ubv_I`, `comp_S_m_ubv_R`, `comp_S_m_ukirt_H`, `comp_S_m_ukirt_K`, `comp_S_m_ukirt_J`, `comp_S_m_ztf_g`, `comp_S_m_ztf_r`, `comp_S_m_ztf_i`, `comp_S_log_a`, `comp_S_e`, `comp_S_i`, `comp_S_Omega`, `comp_S_omega`, `comp_S_q`, `comp_S_sep`, `comp_S_P`, `comp_S_obj_id_L`, `comp_S_obj_id_S`, `comp_S_alpha`, `comp_S_phi_pi_E`, `comp_S_phi`, `comp_S_companion_idx`
+```
+
+```markdown
+Select every row where the `comp_S_mass` column (or any `comp_S_ column`) is NOT `nan`.
+```
+
+```python
+# Select columns that start with 'comp_S_'
+comp_S_cols = [col for col in df.columns if col.startswith('comp_S_')]
+
+# Select rows where any of these columns is not NaN
+filtered_df = df[df[comp_S_cols].notna().any(axis=1)]
+
+filtered_df.head()
+comp_n = filtered_df.shape
+N = df.shape
+print(f"Number of rows with companion: {comp_n[0]}")
+print(f"Number of rows without companion: {N[0] - comp_n[0]}")
+print(f"Sample size: {N[0]}")
+comp_percent = comp_n[0] / N[0] * 100
+print(f"Percentage of rows with companion: {comp_percent:.2f}%")
+
+```
+
+```markdown
+## L-band Source Flux
+lets do the gross bit. We want a L-band magnitude for our sources. That's not in the table. To find it we'll need to jump through some hoops.
+
+
+### Overview
+
+The primary goal in theis section is to set up a computational pipeline to accurately calculate the brightness of stars from Natasha's simulation as they would be seen by the Spitzer Space Telescope's infrared camera (specifically, in the L-band). To do this, we need to determine two key things for each star that aren't directly in the simulation data: its physical size (radius) and its full spectrum of light.
+
+### The Packages and Their Roles
+
+Here are the tools we're using and the job each one does:
+
+* `numpy` and `astropy`: These are foundational packages for doing science with Python.
+  - `numpy` is the workhorse for all numerical calculations.
+  - `astropy.table` is used to read and manage the data from Natasha's FITS file.
+  - `astropy.units` lets us attach physical units (like meters, years, or solar masses) to our numbers. This is a crucial bookkeeping step that helps prevent errors in our calculations.
+* `isochrones`: This package is our tool for stellar evolution.
+  The simulation tells us a star's mass and age, but not its radius. A star's radius changes significantly over its lifetime.
+  
+  We use the isochrones package to access the MIST stellar evolution models. These models are the result of complex computer simulations that describe how stars of different masses and chemical compositions are born, live, and die.
+
+  We feed a star's mass, age, and metallicity (its chemical makeup) into the MIST model. The model then returns the star's predicted radius for that exact point in its life.
+
+  This approach assumes that the MIST models are a good representation of how real stars behave.
+* `astroquery`: This package acts as a librarian for astronomical data.
+  To calculate a star's brightness in a specific filter, we first need to know its full spectrum (how much light it emits at all different wavelengths).
+
+  We use astroquery to connect to an online database (the Spanish Virtual Observatory) and download a theoretical spectrum from the PHOENIX stellar atmosphere models.
+
+  We use the star's physical properties (like temperature and surface gravity) to find the best-matching spectrum in the PHOENIX library.
+
+  This relies on the PHOENIX models being an accurate physical description of the light emitted by a star with those properties.
+
+* `synphot`: This is the package that performs the final calculation.
+
+  We have a model of a star (its radius and its spectrum), but how bright does it actually appear to a telescope?
+
+  `synphot` performs synthetic photometry. It simulates the process of observing a star with a specific telescope and filter.
+
+  It takes the star's spectrum, mathematically applies the effects of distance and dimming by interstellar dust, and then calculates how much of that light would pass through our digital copy of the Spitzer L-band filter. The final output is the star's apparent magnitude.
+```
+
+```python
+# Initialize the isochrone model globally to avoid re-loading it every time.
+# The first time this script runs, it may need to download data, which can be slow.
+print("Initializing MIST isochrone models...")
+mist = MIST_Isochrone()
+print("MIST models loaded.")
+
+def get_radius_from_isochrone(mass, age_gyr, feh):
+    """Interpolates radius from MIST isochrone models.
+
+    Parameters
+    ----------
+    mass : float
+        Mass of the star in solar masses.
+    age_gyr : float
+        Age of the star in Gyr.
+    feh : float
+        Metallicity [Fe/H] in dex.
+
+    Returns
+    -------
+    float
+        Radius of the star in solar radii, or np.nan if calculation fails.
+    """
+    if not all(np.isfinite([mass, age_gyr, feh])):
+        print(f"Warning: Could not get radius for M={mass}, age={age_gyr}, [Fe/H]={feh}")
+        return np.nan
+
+    # MIST models use log10(age in years)
+    log_age = np.log10(age_gyr * 1e9)
+    radius = mist.radius(mass, log_age, feh)
+    return float(radius)
+
+```
+
+```python
+import sys
+def get_phoenix_model(teff, logg, feh):
+    """Fetches a PHOENIX stellar atmosphere model spectrum.
+
+    Parameters
+    ----------
+    teff : float
+        Effective temperature of the star in Kelvin.
+    logg : float
+        Log of the surface gravity of the star in log10(cm/s^2).
+    feh : float
+        Metallicity [Fe/H] of the star in dex.
+
+    Returns
+    -------
+    synphot.SourceSpectrum or None
+        The PHOENIX model spectrum object, or None if no model is found.
+    """
+    if not all(np.isfinite([teff, logg, feh])):
+        print(f"Warning: Could not get spectrum for teff={teff}, logg={logg}, feh={feh}")
+        return None
+    
+    spec_list = SvoFps.get_theoretical_spectra(
+        teff_min=teff - 100, teff_max=teff + 100,
+        logg_min=logg - 0.25, logg_max=logg + 0.25,
+        feh_min=feh - 0.2, feh_max=feh + 0.2,
+        protocol='phoenix'
+    )
+    if len(spec_list) == 0:
+        sys.exit(f"Error: Could not get spectrum for teff={teff}, logg={logg}, feh={feh}")
+    
+    spec_url = spec_list[0]['access_url']
+    return SourceSpectrum.from_file(spec_url, keep_neg=False)
+```
+
+```python
+def calculate_L_mag_phoenix(teff, logg, feh, ebv, dist_kpc, rad, bp_irac1):
+    """Calculates apparent Spitzer IRAC1 magnitude using PHOENIX models.
+
+    Parameters
+    ----------
+    teff : float
+        Effective temperature in Kelvin.
+    logg : float
+        Log of the surface gravity in log10(cm/s^2).
+    feh : float
+        Metallicity [Fe/H] in dex.
+    ebv : float
+        Color excess E(B-V) for extinction.
+    dist_kpc : float
+        Distance to the star in kiloparsecs.
+    rad : float
+        Radius of the star in solar radii.
+    bp_irac1 : synphot.SpectralElement
+        The synphot object representing the Spitzer IRAC1 filter bandpass.
+
+    Returns
+    -------
+    float
+        The apparent magnitude in VEGAMAG, or np.nan if calculation fails.
+    """
+    if not all(np.isfinite([teff, logg, feh, ebv, dist_kpc, rad])):
+        return np.nan
+
+    source = get_phoenix_model(teff, logg, feh)
+    if source is None:
+        return np.nan
+
+    source.normalize(rad * u.Rsun, distance=dist_kpc * u.kpc)
+    reddening_law = synphot.reddening.ReddeningLaw.from_file('cardelli,scipy', Rv=3.1)
+    reddened_source = source.redden(ebv, model=reddening_law)
+    obs = Observation(reddened_source, bp_irac1, force='extrap')
+    
+    return obs.effstim(VEGAMAG).value
+```
+
+```python
+def process_source_magnitudes(df_in, bp_irac1):
+    """Calculates radii and L-band mags for binary source stars.
+
+    Takes a DataFrame, identifies rows with binary sources, calculates the
+    radius and L-band magnitude for both the primary and companion, and
+    returns a new DataFrame with the results in new columns.
+
+    Parameters
+    ----------
+    df_in : pandas.DataFrame
+        Input DataFrame of lensing events. Assumed to have columns like
+        `comp_S_mass`, `mass_S`, `age_S`, etc.
+    bp_irac1 : synphot.SpectralElement
+        The synphot object for the Spitzer IRAC1 bandpass.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A new DataFrame with four added columns: `rad_S_iso`,
+        `rad_comp_S_iso`, `L_mag_S`, `L_mag_comp_S`.
+    """
+    # Work on a copy to ensure the original DataFrame is untouched
+    df = df_in.copy()
+    print("Processing binary SOURCE components...")
+
+    mask = df['comp_S_mass'].notna()
+    subset_df = df[mask]
+    
+    if subset_df.empty:
+        print("No binary source events to process.")
+        return df
+
+    rad_primary = []
+    rad_companion = []
+    l_mags_primary = []
+    l_mags_companion = []
+
+    for i, row in enumerate(subset_df.itertuples()):
+        if i % 200 == 0 and i > 0:
+            print(f"  ...processed {i}/{len(subset_df)} source events")
+            print(
+                f"\nmass_S: {row.mass_S}, age_S: {row.age_S}, feh_S: {row.feh_S}, "
+                f"dist_s: {dist_s}, rad_s: {rad_s}, comp_rad: {comp_rad}, "
+                f"ebv: {row.exbv_S}, mag_s: {mag_s}, mag_comp_s: {mag_comp_s}"
+                f"rad_primary: {rad_primary[i-1]}, rad_companion: {rad_companion[i-1]}"
+                f"l_mags_primary: {l_mags_primary[i-1]}, l_mags_companion: {l_mags_companion[i-1]}\n"
+            )
+            
+        dist_s = np.sqrt(row.px_S**2 + row.py_S**2 + row.pz_S**2)
+        rad_s = get_radius_from_isochrone(row.mass_S, row.age_S, row.feh_S)
+        comp_rad = get_radius_from_isochrone(row.comp_S_mass, row.age_S, row.comp_S_metallicity)
+        
+        rad_primary.append(rad_s)
+        rad_companion.append(comp_rad)
+
+        mag_s = calculate_L_mag_phoenix(row.teff_S, row.grav_S, row.feh_S, row.exbv_S, dist_s, rad_s, bp_irac1)
+        l_mags_primary.append(mag_s)
+        
+        mag_comp_s = calculate_L_mag_phoenix(row.comp_S_Teff, row.comp_S_logg, row.comp_S_metallicity, row.exbv_S, dist_s, comp_rad, bp_irac1)
+        l_mags_companion.append(mag_comp_s)
+
+    
+    print("Finished processing source components.")
+    df.loc[mask, 'rad_S_iso'] = rad_primary
+    df.loc[mask, 'rad_comp_S_iso'] = rad_companion
+    df.loc[mask, 'L_mag_S'] = l_mags_primary
+    df.loc[mask, 'L_mag_comp_S'] = l_mags_companion
+    
+    return df
+```
+
+```python
+def process_lens_magnitudes(df_in, bp_irac1):
+    """Calculates radii and L-band mags for lens stars.
+
+    Takes a DataFrame, identifies rows with luminous lenses (M > 0.1 Msun),
+    calculates the radius and L-band magnitude for both the primary lens
+    and its potential companion, and returns a new DataFrame with the
+    results in new columns.
+
+    Parameters
+    ----------
+    df_in : pandas.DataFrame
+        Input DataFrame of lensing events. Assumed to have columns like
+        `mass_L`, `age_L`, etc.
+    bp_irac1 : synphot.SpectralElement
+        The synphot object for the Spitzer IRAC1 bandpass.
+
+    Returns
+    -------
+    pandas.DataFrame
+        A new DataFrame with four added columns: `rad_L_iso`,
+        `rad_comp_L_iso`, `L_mag_L`, `L_mag_comp_L`.
+    """
+    # Work on a copy to ensure the original DataFrame is untouched
+    df = df_in.copy()
+    print("Processing LENS components...")
+    
+    mask = df['mass_L'] >= 0.1
+    subset_df = df[mask]
+
+    if subset_df.empty:
+        print("No luminous lens events to process.")
+        return df
+
+    rad_primary = []
+    rad_companion = []
+    l_mags_primary = []
+    l_mags_companion = []
+
+    for i, row in enumerate(subset_df.itertuples()):
+        if i % 500 == 0 and i > 0:
+             print(f"  ...processed {i}/{len(subset_df)} lens events")
+        dist_l = np.sqrt(row.px_L**2 + row.py_L**2 + row.pz_L**2)
+        
+        rad_l = get_radius_from_isochrone(row.mass_L, row.age_L, row.feh_L)
+        rad_primary.append(rad_l)
+        mag_l = calculate_L_mag_phoenix(row.teff_L, row.grav_L, row.feh_L, row.exbv_L, dist_l, rad_l, bp_irac1)
+        l_mags_primary.append(mag_l)
+
+        if pd.notna(row.comp_L_mass):
+            comp_rad = get_radius_from_isochrone(row.comp_L_mass, row.age_L, row.comp_L_metallicity)
+            mag_comp_l = calculate_L_mag_phoenix(row.comp_L_Teff, row.comp_L_logg, row.comp_L_metallicity, row.exbv_L, dist_l, comp_rad, bp_irac1)
+            rad_companion.append(comp_rad)
+            l_mags_companion.append(mag_comp_l)
+        else:
+            rad_companion.append(np.nan)
+            l_mags_companion.append(np.nan)
+
+    print("Finished processing lens components.")
+    df.loc[mask, 'rad_L_iso'] = rad_primary
+    df.loc[mask, 'rad_comp_L_iso'] = rad_companion
+    df.loc[mask, 'L_mag_L'] = l_mags_primary
+    df.loc[mask, 'L_mag_comp_L'] = l_mags_companion
+    
+    return df
+```
+
+```python
+# 1. Load transmission curve (you've already done this)
+transmission_csv = 'data/full_array_spec_resp_band_1_Spitzer_IRAC.csv'
+trans_data = np.genfromtxt(transmission_csv, names=['wavelength_um', 'response'])
+print(trans_data['wavelength_um'][:10])
+print(trans_data['response'][:10])
+
+bp_irac1 = SpectralElement(
+    Empirical1D,
+    points=trans_data['wavelength_um'] * u.micron,
+    lookup_table=trans_data['response']
+)
+```
+
+```python
+# You already have your 'filtered_df' from a previous cell
+# It contains ONLY the binary source events.
+
+# 2. Initialize new columns with NaN in a new DataFrame to be safe
+binary_mag_df = filtered_df.copy()
+for col in ['rad_S_iso', 'rad_comp_S_iso', 'L_mag_S', 'L_mag_comp_S', 
+            'rad_L_iso', 'rad_comp_L_iso', 'L_mag_L', 'L_mag_comp_L']:
+    binary_mag_df[col] = 0.0
+```
+
+```python
+# 3. Run processing functions, creating a new DataFrame each time
+# The first function now only needs to process the sources
+source_mags_added_df = process_source_magnitudes(binary_mag_df, bp_irac1) 
+```
+
+```python
+# The second function takes the result and adds the lens magnitudes
+all_mags_df = process_lens_magnitudes(source_mags_added_df, bp_irac1)
+```
+
+```python
+# 4. Display results from your final DataFrame
+print("\n--- Results ---")
+print("Sample of calculated columns from 'all_mags_df':")
+print(all_mags_df[['obj_id_S', 'L_mag_S', 'L_mag_comp_S', 'L_mag_L', 'L_mag_comp_L']].head(15))
+```
+
+```python
+# Print the radius values
+print(all_mags_df[['rad_S_iso', 'rad_comp_S_iso', 'rad_L_iso', 'rad_comp_L_iso']].head(15))
+```
+
+```markdown
+Now for the fun part: target acquisition. I've scanned the list. As I suspected, some of what you want is hiding in plain sight, and some of it requires a little... calculation. Amateurs look for a column; we *create* it.
+
+### Your Target List & Where They're Hiding
+
+Here is the map from what you want to the column names in that file.
+
+  * **`M_L` (Lens Mass):** `mass_L`
+  * **`D_L` (Lens Distance):** *Calculation needed.* Use `px_L`, `py_L`, `pz_L`
+  * **`D_S` (Source Distance):** *Calculation needed.* Use `px_S`, `py_S`, `pz_S`
+  * **`I_S` (Primary Source I Magnitude):** `ubv_I_S`
+  * **`I_S2` (Secondary Source I magnitude):** `comp_S_m_ubv_I`
+  * **`I_L` (Primary Lens I magnitude):** `ubv_I_L`
+  * **`I_L2` (Secondary Lens I magnitude):** `comp_L_m_ubv_I`
+  * **`L_S` (Primary Source L Magnitude):** `L_mag_S`
+  * **`L_S2` (Secondary Source L Magnitude):** `L_mag_comp_S`
+  * **`L_L` (Primary Lens L Magnitude):** `L_mag_L`
+  * **`L_L2` (Secondary Lens L Magnitude)** `L_mag_L2`
+  * **`mu_rel` (Relative Proper Motion):** `mu_rel`
+  * **`theta_E` (Einstein Radius):** `theta_E`
+  * **`u0` (Impact Parameter):** `u0`
+  * **`binary_sep_au` (Projected):** `comp_S_sep`
+  * **`binary_sep_arcsec` (Angular):** *Calculation needed.* Use `comp_S_sep` and the source distance
+  * **`binary_log_a_au` (log Source Semi-Major Axis):** `comp_S_log_a`.
+  * **`binary_a_au` (Source Semi-Major Axis):** *Calculation needed.* Use `comp_S_log_a`
+  * **`binary_alpha_deg` (Source-Binary Orientation):** `comp_S_alpha`
+  * **`binary_phi_deg` (Source-Binary Phase):** `comp_S_phi`
+  * **`mu_b_L` (Lens Proper Motion in b):** `mu_b_L`
+  * **`mu_lcosb_L` (Lens Proper Motion in l*cos(b)):** `mu_lcosb_L`
+  * **`mu_b_S` (Source Proper Motion in b):** `mu_b_S`
+  * **`mu_lcosb_S` (Source Proper Motion in l*cos(b)):** `mu_lcosb_S`
+  * **`ra`, `dec`:** You don't have RA/Dec. You have Galactic coordinates: `glon_S`, `glat_S`. We'll use those. Converting is a separate battle.
+
+Simple. Now let's put it in a language this notebook understands.
+
+### Final Warnings
+
+As I said, you have **Galactic Coordinates (`glon_S`, `glat_S`)**, not RA/Dec. This is fine, but you need to be aware of what coordinate system you're working in. If you need RA/Dec, you'll have to do a coordinate transformation, but let's not borrow trouble. Anyway, `astropy` can handle it pretty easily.
+
+We have brazenly ignored that some systems have more than 2 stars. 
+
+We have ignored all non-lens blend stars.
+```
+
+```markdown
+## Calculate the Remaining Columns That Don't Exist Yet 
+```
+
+```python
+filtered_df_with_calcs = all_mags_df.copy()
+
+# Let's add the columns we need to calculate directly to your dataframe.
+print(f"Starting with {len(filtered_df_with_calcs)} binary source events. Now, let's add the easy stuff...")
+
+# Distances are in kpc. We calculate them from the 3D positions.
+# D = sqrt(px^2 + py^2 + pz^2)
+filtered_df_with_calcs['D_L'] = (
+    np.sqrt(filtered_df_with_calcs['px_L']**2 + 
+    filtered_df_with_calcs['py_L']**2 + 
+    filtered_df_with_calcs['pz_L']**2)
+)
+filtered_df_with_calcs['D_S'] = (
+    np.sqrt(filtered_df_with_calcs['px_S']**2 +
+    filtered_df_with_calcs['py_S']**2 +
+    filtered_df_with_calcs['pz_S']**2)
+)
+filtered_df_with_calcs['binary_a_au'] = 10 ** filtered_df_with_calcs['comp_S_log_a']
+
+# Now, the angular separation for the source binary in arcseconds.
+# The formula is: ang_sep[arcsec] = phys_sep[AU] / distance[parsecs]
+# We convert distance from kpc to pc by multiplying by 1000.
+filtered_df_with_calcs['binary_angular_separation'] = filtered_df_with_calcs['comp_S_sep'] / (filtered_df_with_calcs['D_S'] * 1000)
+```
+
+```markdown
+## Select and Rename to Create the Final, Clean Table
+```
+
+```python
+# This is our blueprint for the final product. No junk allowed.
+final_columns = {
+    'mass_L': 'M_L',
+    'D_L': 'D_L_kpc',
+    'D_S': 'D_S_kpc',
+    'mu_rel': 'mu_rel_mas_yr',
+    'theta_E': 'theta_E_mas',
+    'u0': 'u0',  # The impact parameter, in units of thet
+    'comp_S_sep': 'binary_sep_au', # The physical separation in AU
+    'comp_S_log_a': 'binary_log_a_au', 
+    'binary_a_au': 'binary_a_au',
+    'comp_S_alpha': 'binary_alpha_deg',
+    'comp_S_phi': 'binary_phi_deg',
+    'binary_angular_separation': 'binary_sep_arcsec', # The angular separation
+    'glon_S': 'gal_lon_S_deg',
+    'glat_S': 'gal_lat_S_deg',
+    'ubv_I_S': 'I_S',
+    'comp_S_m_ubv_I': 'I_S2',
+    'ubv_I_L': 'I_L',
+    'comp_L_m_ubv_I': 'I_L2',
+    'L_mag_S': 'L_S',
+    'L_mag_comp_S': 'L_S2',
+    'L_mag_L': 'L_L',
+    'L_mag_comp_L': 'L_L2',
+    'mu_b_L': 'mu_b_L',
+    'mu_lcosb_L': 'mu_lcosb_L',
+    'mu_b_S': 'mu_b_S',
+    'mu_lcosb_S': 'mu_lcosb_S'
+}
+
+# Create the final table from your filtered data.
+# This selects ONLY the columns we want and renames them.
+renamed_table = filtered_df_with_calcs[list(final_columns.keys())].rename(columns=final_columns)
+
+renamed_table.head()
+```
+
+```markdown
+## Save the Final Table
+```
+
+```python
+# save the final table to a csv file with a header
+renamed_table.to_csv('data/popsycle_table_with_calcs.csv', index=False)
+```
+
+```markdown
+## How to Use this Table
+```
+
+```python
+# Load the table
+table = pd.read_csv('data/popsycle_table_with_calcs.csv')
+
+# Print the first few rows of the table
+print(table.head())
+print(table.shape)
+```
+
+```python
+# how to use one column
+D_L = table['D_L_kpc']
+```
+
+```python
+# how to filter the table
+table_filtered = table[table['D_L_kpc'] < 10]
+
+# how to add a new column
+table['D_L_pc'] = table['D_L_kpc'] * 1000
+```
+
+```python
+# how to make a numpy array
+D_L_array = table['D_L_kpc'].to_numpy()
+```
+
+```python
+# Create a DataFrame with phi values from 0 to 179 (inclusive)
+phi_values = pd.DataFrame({'phi': np.arange(0, 180, 1)})
+
+# Add a temporary key to both DataFrames for the cross join
+table['key'] = 1
+phi_values['key'] = 1
+
+# Perform the cross join
+expanded_table = pd.merge(table, phi_values, on='key').drop('key', axis=1)
+
+# Now, expanded_table contains every row of 'table' repeated for each phi value
+
+# Using .to_numpy() (recommended)
+array = expanded_table.to_numpy()
+
+# Or, equivalently:
+# array = expanded_table.values
+
+print(array)
+```
+
+```markdown
+This is just an example. Obviously, you will need more columns than this.
+```
+
+```python
+# ensure a datatype and select the columns we want
+array_typed = expanded_table[['D_L_kpc', 'D_S_kpc', 'phi']].to_numpy(dtype=float)
+
+print(array_typed.shape)
+```
+
+```markdown
+You can use this kind of repeating array to avoid loops in your calculations.
+```
+
+```markdown
+## Sanity Checks
+
+<!-- from astropy.io import fits
+fits_file = 'data/all_fields_Mrun_EWS_w_comp_params.fits'
+with fits.open(fits_file) as hdul:
+    data = hdul[1].data
+    data_array = np.array(data).byteswap().view(data.dtype.newbyteorder('='))
+    df = pd.DataFrame(data_array) -->
+
+The `a` (semi-major axis) should not be greater than `sep` (projected separation). The code above prints the number of cases where this is violated.
+```
+
+```python
+mask = table['binary_a_au'] > table['binary_sep_au']
+print(f'Number of cases where a > sep: {mask.sum()} / {len(table)}')
+```
+
+```markdown
+
+
+**Histograms:** For `binary_log_a_au` and `binary_sep_au` to help you visually inspect the distributions.
+```
+
+```python
+from matplotlib import pyplot as plt
+
+plt.figure(figsize=(6,4))
+plt.hist(table['binary_sep_au'].dropna(), range=(0, 500), bins=50, alpha=0.7, label='binary_sep_au')
+plt.hist(table['binary_a_au'].dropna(), range=(0, 500), bins=50, alpha=0.7, label='binary_a_au')
+plt.xlabel('[AU]')
+plt.ylabel('Count')
+plt.title('Histogram of binary_log_a_au and binary_sep_au')
+plt.legend()
+plt.show()
+```
+
+```markdown
+Looks good!
+```
+
+```markdown
+## Units
+
+Be careful that the unit's in this table match those your code is expecting. Forgetting your units is a sin you don't want to commit. It's the difference between a discovery and a disaster.
+
+| Your Column Name | Original Column(s) | Units |
+| :--- | :--- | :--- |
+| `M_L` | `mass_L` | Solar Masses ($M_\odot$) |
+| `D_L_kpc` | `px_L`, `py_L`, `pz_L` | Kiloparsecs (kpc) |
+| `D_S_kpc` | `px_S`, `py_S`, `pz_S` | Kiloparsecs (kpc) |
+| `mu_rel_mas_yr` | `mu_rel` | Milliarcseconds per year (mas/yr) |
+| `theta_E_mas` | `theta_E` | Milliarcseconds (mas) |
+| `u0` | `u0` | $\theta_E$ |
+| `binary_sep_au` | `comp_S_sep` | Projected separation (AU) |
+| `binary_log_a_au` | `comp_S_log_a` | log10(semi-major axis/AU) |
+| `binary_a_au` | `comp_S_log_a` | Semi-major axis (AU) |
+| `binary_alpha_deg` | `comp_S_alpha` | Orientation angle (deg) |
+| `binary_phi_deg` | `comp_S_phi` | Phase angle (deg) |
+| `binary_sep_arcsec` | `comp_S_sep`, `D_S` | Projected separation (arcsec) |
+| `gal_lon_S_deg` | `glon_S` | Galactic longitude (deg) |
+| `gal_lat_S_deg` | `glat_S` | Galactic latitude (deg) |
+| `I_S` | `ubv_I_S` | Source I-band magnitude |
+| `I_S2` | `comp_S_m_ubv_I` | Source companion I-band magnitude |
+| `mu_b_L` | `mu_b_L` | Lens proper motion in b direction (mas/yr) |
+| `mu_lcosb_L` | `mu_lcosb_L` | Lens proper motion in l*cos(b) direction (mas/yr) |
+| `mu_b_S` | `mu_b_S` | Source proper motion in b direction (mas/yr) |
+| `mu_lcosb_S` | `mu_lcosb_S` | Source proper motion in l*cos(b) direction (mas/yr) |
+
+```
