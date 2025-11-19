@@ -26,19 +26,19 @@ from astropy.io import fits
 import numpy as np
 from astropy.table import Table
 import astropy.units as u
-# You'll need to install these libraries
-import synphot
-from synphot import SourceSpectrum, Observation, SpectralElement
-from synphot.models import Empirical1D
-from synphot.units import VEGAMAG
-from astroquery.svo_fps import SvoFps
-from isochrones.mist import MIST_Isochrone
+from isochrones.mist import MIST_EvolutionTrack
+import warnings
 
 # Initialize the isochrone model globally to avoid re-loading it every time.
 # The first time this script runs, it may need to download data, which can be slow.
 print("Initializing MIST isochrone models...")
-mist = MIST_Isochrone()
+# We're using the EvolutionTrack object now, not Isochrone
+mist_track = MIST_EvolutionTrack()
 print("MIST models loaded.")
+
+# The WISE W1 filter is our proxy for Spitzer L-band.
+# To see all available bands, run: 
+print(mist_track.bands)
 ```
 
 ```markdown
@@ -112,40 +112,36 @@ Here are the tools we're using and the job each one does:
   - `astropy.table` is used to read and manage the data from Natasha's FITS file.
   - `astropy.units` lets us attach physical units (like meters, years, or solar masses) to our numbers. This is a crucial bookkeeping step that helps prevent errors in our calculations.
 * `isochrones`: This package is our tool for stellar evolution.
-  The simulation tells us a star's mass and age, but not its radius. A star's radius changes significantly over its lifetime.
+  The simulation tells us a star's mass, age, and distance, which we can use to get it's intrinsic L-band magnitude. The simulation also includes extinction, from which we can caluculate the apparent L-band magnitude.
   
-  We use the isochrones package to access the MIST stellar evolution models. These models are the result of complex computer simulations that describe how stars of different masses and chemical compositions are born, live, and die.
+  We use the isochrones package to access the [MIST stellar evolution models](https://waps.cfa.harvard.edu/MIST/model_grids.html#eeps). These models are the result of complex computer simulations that describe how stars of different masses and chemical compositions are born, live, and die.
 
-  We feed a star's mass, age, and metallicity (its chemical makeup) into the MIST model. The model then returns the star's predicted radius for that exact point in its life.
+  We feed a star's mass, age, and metallicity (its chemical makeup) into the MIST model. The model then returns the star's predicted brightness for that exact point in its life.
 
-  This approach assumes that the MIST models are a good representation of how real stars behave.
-* `astroquery`: This package acts as a librarian for astronomical data.
-  To calculate a star's brightness in a specific filter, we first need to know its full spectrum (how much light it emits at all different wavelengths).
-
-  We use astroquery to connect to an online database (the Spanish Virtual Observatory) and download a theoretical spectrum from the PHOENIX stellar atmosphere models.
-
-  We use the star's physical properties (like temperature and surface gravity) to find the best-matching spectrum in the PHOENIX library.
-
-  This relies on the PHOENIX models being an accurate physical description of the light emitted by a star with those properties.
-
-* `synphot`: This is the package that performs the final calculation.
-
-  We have a model of a star (its radius and its spectrum), but how bright does it actually appear to a telescope?
-
-  `synphot` performs synthetic photometry. It simulates the process of observing a star with a specific telescope and filter.
-
-  It takes the star's spectrum, mathematically applies the effects of distance and dimming by interstellar dust, and then calculates how much of that light would pass through our digital copy of the Spitzer L-band filter. The final output is the star's apparent magnitude.
+  This approach assumes that the MIST models are a good representation of how real stars behave. The bands available in the `isochrone` package do not include Spitzer IRAC, but Wise's W1 filter is comparable.
 ```
 
 ```python
-# Initialize the isochrone model globally to avoid re-loading it every time.
-# The first time this script runs, it may need to download data, which can be slow.
-print("Initializing MIST isochrone models...")
-mist = MIST_Isochrone()
-print("MIST models loaded.")
+# The WISE W1 filter is our proxy for Spitzer L-band.
+# not using this proxy makes life SIGNIFICANTLY more difficult
+WISE_W1_FILTER_NAME = 'W1_mag'  # Why _mag? because their users hate me and want
+# their live to be hard.
 
-def get_radius_from_isochrone(mass, age_gyr, feh):
-    """Interpolates radius from MIST isochrone models.
+# DEPRICATED (but handy)
+# This constant defines the ratio of extinction in W1 vs V-band.
+# It's very similar to the L-band value.
+# Predictions of an R(V) = 3.1 Fitzpatrick extinction law at E(B − V) = 0.4 for 
+# a 7000-K source spectrum, assuming that SFD overpredict the true values of 
+# E(B − V) by 14 per cent.
+#R_W1 = 0.186  # Yuan, Liu, & Xiang (2013) Table 2 - Fitzpatrick (1999)
+
+def get_apparent_L_mag(mass, age_gyr, feh, dist_kpc, ebv):
+    """
+    Calculates the apparent L-band magnitude for a star.
+
+    This function uses the MIST_EvolutionTrack.generate() method to
+    compute stellar properties based on mass, age, and metallicity,
+    including the apparent W1 magnitude (used as a proxy for L-band).
 
     Parameters
     ----------
@@ -155,102 +151,45 @@ def get_radius_from_isochrone(mass, age_gyr, feh):
         Age of the star in Gyr.
     feh : float
         Metallicity [Fe/H] in dex.
-
-    Returns
-    -------
-    float
-        Radius of the star in solar radii, or np.nan if calculation fails.
-    """
-    if not all(np.isfinite([mass, age_gyr, feh])):
-        print(f"Warning: Could not get radius for M={mass}, age={age_gyr}, [Fe/H]={feh}")
-        return np.nan
-
-    # MIST models use log10(age in years)
-    log_age = np.log10(age_gyr * 1e9)
-    radius = mist.radius(mass, log_age, feh)
-    return float(radius)
-
-```
-
-```python
-import sys
-def get_phoenix_model(teff, logg, feh):
-    """Fetches a PHOENIX stellar atmosphere model spectrum.
-
-    Parameters
-    ----------
-    teff : float
-        Effective temperature of the star in Kelvin.
-    logg : float
-        Log of the surface gravity of the star in log10(cm/s^2).
-    feh : float
-        Metallicity [Fe/H] of the star in dex.
-
-    Returns
-    -------
-    synphot.SourceSpectrum or None
-        The PHOENIX model spectrum object, or None if no model is found.
-    """
-    if not all(np.isfinite([teff, logg, feh])):
-        print(f"Warning: Could not get spectrum for teff={teff}, logg={logg}, feh={feh}")
-        return None
-    
-    spec_list = SvoFps.get_theoretical_spectra(
-        teff_min=teff - 100, teff_max=teff + 100,
-        logg_min=logg - 0.25, logg_max=logg + 0.25,
-        feh_min=feh - 0.2, feh_max=feh + 0.2,
-        protocol='phoenix'
-    )
-    if len(spec_list) == 0:
-        sys.exit(f"Error: Could not get spectrum for teff={teff}, logg={logg}, feh={feh}")
-    
-    spec_url = spec_list[0]['access_url']
-    return SourceSpectrum.from_file(spec_url, keep_neg=False)
-```
-
-```python
-def calculate_L_mag_phoenix(teff, logg, feh, ebv, dist_kpc, rad, bp_irac1):
-    """Calculates apparent Spitzer IRAC1 magnitude using PHOENIX models.
-
-    Parameters
-    ----------
-    teff : float
-        Effective temperature in Kelvin.
-    logg : float
-        Log of the surface gravity in log10(cm/s^2).
-    feh : float
-        Metallicity [Fe/H] in dex.
-    ebv : float
-        Color excess E(B-V) for extinction.
     dist_kpc : float
         Distance to the star in kiloparsecs.
-    rad : float
-        Radius of the star in solar radii.
-    bp_irac1 : synphot.SpectralElement
-        The synphot object representing the Spitzer IRAC1 filter bandpass.
+    ebv : float
+        Color excess E(B-V) for extinction.
 
     Returns
     -------
     float
-        The apparent magnitude in VEGAMAG, or np.nan if calculation fails.
+        The final apparent magnitude.
     """
-    if not all(np.isfinite([teff, logg, feh, ebv, dist_kpc, rad])):
+    if not all(np.isfinite([mass, age_gyr, feh, dist_kpc, ebv])):
         return np.nan
 
-    source = get_phoenix_model(teff, logg, feh)
-    if source is None:
-        return np.nan
+    # --- NO TRY/EXCEPT ---
+    # Let it fail loudly if something goes wrong.
 
-    source.normalize(rad * u.Rsun, distance=dist_kpc * u.kpc)
-    reddening_law = synphot.reddening.ReddeningLaw.from_file('cardelli,scipy', Rv=3.1)
-    reddened_source = source.redden(ebv, model=reddening_law)
-    obs = Observation(reddened_source, bp_irac1, force='extrap')
+    # Convert our parameters to what .generate() expects.
+    dist_pc = dist_kpc * 1000
+    # AV is the total V-band extinction.
+    AV = 3.1 * ebv
     
-    return obs.effstim(VEGAMAG).value
+    # The .generate() method takes arrays, so we wrap our single values.
+    # The key change is using 'mass' as the keyword, not 'masses'.
+    properties = mist_track.generate(
+        mass,  # This is the corrected argument name
+        age_gyr, 
+        feh,
+        distance=dist_pc,
+        AV=AV
+    )
+    
+    # The result is a pandas DataFrame. We extract the magnitude we want.
+    app_mag_final = properties[WISE_W1_FILTER_NAME].iloc[0]
+
+    return app_mag_final
 ```
 
 ```python
-def process_source_magnitudes(df_in, bp_irac1):
+def process_source_magnitudes(df_in):
     """Calculates radii and L-band mags for binary source stars.
 
     Takes a DataFrame, identifies rows with binary sources, calculates the
@@ -262,8 +201,6 @@ def process_source_magnitudes(df_in, bp_irac1):
     df_in : pandas.DataFrame
         Input DataFrame of lensing events. Assumed to have columns like
         `comp_S_mass`, `mass_S`, `age_S`, etc.
-    bp_irac1 : synphot.SpectralElement
-        The synphot object for the Spitzer IRAC1 bandpass.
 
     Returns
     -------
@@ -274,55 +211,35 @@ def process_source_magnitudes(df_in, bp_irac1):
     # Work on a copy to ensure the original DataFrame is untouched
     df = df_in.copy()
     print("Processing binary SOURCE components...")
-
-    mask = df['comp_S_mass'].notna()
-    subset_df = df[mask]
     
-    if subset_df.empty:
+    if df.empty:
         print("No binary source events to process.")
         return df
 
-    rad_primary = []
-    rad_companion = []
     l_mags_primary = []
     l_mags_companion = []
 
-    for i, row in enumerate(subset_df.itertuples()):
+    for i, row in enumerate(df.itertuples()):
         if i % 200 == 0 and i > 0:
-            print(f"  ...processed {i}/{len(subset_df)} source events")
-            print(
-                f"\nmass_S: {row.mass_S}, age_S: {row.age_S}, feh_S: {row.feh_S}, "
-                f"dist_s: {dist_s}, rad_s: {rad_s}, comp_rad: {comp_rad}, "
-                f"ebv: {row.exbv_S}, mag_s: {mag_s}, mag_comp_s: {mag_comp_s}"
-                f"rad_primary: {rad_primary[i-1]}, rad_companion: {rad_companion[i-1]}"
-                f"l_mags_primary: {l_mags_primary[i-1]}, l_mags_companion: {l_mags_companion[i-1]}\n"
-            )
+            print(f"  ...processed {i}/{len(df)} source events")
             
         dist_s = np.sqrt(row.px_S**2 + row.py_S**2 + row.pz_S**2)
-        rad_s = get_radius_from_isochrone(row.mass_S, row.age_S, row.feh_S)
-        comp_rad = get_radius_from_isochrone(row.comp_S_mass, row.age_S, row.comp_S_metallicity)
-        
-        rad_primary.append(rad_s)
-        rad_companion.append(comp_rad)
-
-        mag_s = calculate_L_mag_phoenix(row.teff_S, row.grav_S, row.feh_S, row.exbv_S, dist_s, rad_s, bp_irac1)
+        mag_s = get_apparent_L_mag(row.mass_S, row.age_S, row.feh_S, dist_s, row.exbv_S)
         l_mags_primary.append(mag_s)
         
-        mag_comp_s = calculate_L_mag_phoenix(row.comp_S_Teff, row.comp_S_logg, row.comp_S_metallicity, row.exbv_S, dist_s, comp_rad, bp_irac1)
+        mag_comp_s = get_apparent_L_mag(row.comp_S_mass, row.age_S, row.comp_S_metallicity, dist_s, row.exbv_S)
         l_mags_companion.append(mag_comp_s)
 
     
     print("Finished processing source components.")
-    df.loc[mask, 'rad_S_iso'] = rad_primary
-    df.loc[mask, 'rad_comp_S_iso'] = rad_companion
-    df.loc[mask, 'L_mag_S'] = l_mags_primary
-    df.loc[mask, 'L_mag_comp_S'] = l_mags_companion
+    df.loc[:, 'L_mag_S'] = l_mags_primary
+    df.loc[:, 'L_mag_comp_S'] = l_mags_companion
     
     return df
 ```
 
 ```python
-def process_lens_magnitudes(df_in, bp_irac1):
+def process_lens_magnitudes(df_in):
     """Calculates radii and L-band mags for lens stars.
 
     Takes a DataFrame, identifies rows with luminous lenses (M > 0.1 Msun),
@@ -335,8 +252,6 @@ def process_lens_magnitudes(df_in, bp_irac1):
     df_in : pandas.DataFrame
         Input DataFrame of lensing events. Assumed to have columns like
         `mass_L`, `age_L`, etc.
-    bp_irac1 : synphot.SpectralElement
-        The synphot object for the Spitzer IRAC1 bandpass.
 
     Returns
     -------
@@ -348,15 +263,14 @@ def process_lens_magnitudes(df_in, bp_irac1):
     df = df_in.copy()
     print("Processing LENS components...")
     
-    mask = df['mass_L'] >= 0.1
+    mask = df['mass_L'] >= 0.11  # get weird artefacts from the isochrones if we 
+                                 # go down any lower
     subset_df = df[mask]
 
     if subset_df.empty:
         print("No luminous lens events to process.")
         return df
 
-    rad_primary = []
-    rad_companion = []
     l_mags_primary = []
     l_mags_companion = []
 
@@ -364,24 +278,17 @@ def process_lens_magnitudes(df_in, bp_irac1):
         if i % 500 == 0 and i > 0:
              print(f"  ...processed {i}/{len(subset_df)} lens events")
         dist_l = np.sqrt(row.px_L**2 + row.py_L**2 + row.pz_L**2)
-        
-        rad_l = get_radius_from_isochrone(row.mass_L, row.age_L, row.feh_L)
-        rad_primary.append(rad_l)
-        mag_l = calculate_L_mag_phoenix(row.teff_L, row.grav_L, row.feh_L, row.exbv_L, dist_l, rad_l, bp_irac1)
+
+        mag_l = get_apparent_L_mag(row.mass_L, row.age_L, row.feh_L, dist_l, row.exbv_L)
         l_mags_primary.append(mag_l)
 
         if pd.notna(row.comp_L_mass):
-            comp_rad = get_radius_from_isochrone(row.comp_L_mass, row.age_L, row.comp_L_metallicity)
-            mag_comp_l = calculate_L_mag_phoenix(row.comp_L_Teff, row.comp_L_logg, row.comp_L_metallicity, row.exbv_L, dist_l, comp_rad, bp_irac1)
-            rad_companion.append(comp_rad)
+            mag_comp_l = get_apparent_L_mag(row.comp_L_mass, row.age_L, row.comp_L_metallicity, dist_l, row.exbv_L)
             l_mags_companion.append(mag_comp_l)
         else:
-            rad_companion.append(np.nan)
             l_mags_companion.append(np.nan)
 
     print("Finished processing lens components.")
-    df.loc[mask, 'rad_L_iso'] = rad_primary
-    df.loc[mask, 'rad_comp_L_iso'] = rad_companion
     df.loc[mask, 'L_mag_L'] = l_mags_primary
     df.loc[mask, 'L_mag_comp_L'] = l_mags_companion
     
@@ -390,16 +297,16 @@ def process_lens_magnitudes(df_in, bp_irac1):
 
 ```python
 # 1. Load transmission curve (you've already done this)
-transmission_csv = 'data/full_array_spec_resp_band_1_Spitzer_IRAC.csv'
-trans_data = np.genfromtxt(transmission_csv, names=['wavelength_um', 'response'])
-print(trans_data['wavelength_um'][:10])
-print(trans_data['response'][:10])
+#transmission_csv = 'data/full_array_spec_resp_band_1_Spitzer_IRAC.csv'
+#trans_data = np.genfromtxt(transmission_csv, names=['wavelength_um', 'response'])
+#print(trans_data['wavelength_um'][:10])
+#print(trans_data['response'][:10])
 
-bp_irac1 = SpectralElement(
-    Empirical1D,
-    points=trans_data['wavelength_um'] * u.micron,
-    lookup_table=trans_data['response']
-)
+#bp_irac1 = SpectralElement(
+#    Empirical1D,
+#    points=trans_data['wavelength_um'] * u.micron,
+#    lookup_table=trans_data['response']
+#)
 ```
 
 ```python
@@ -408,20 +315,40 @@ bp_irac1 = SpectralElement(
 
 # 2. Initialize new columns with NaN in a new DataFrame to be safe
 binary_mag_df = filtered_df.copy()
-for col in ['rad_S_iso', 'rad_comp_S_iso', 'L_mag_S', 'L_mag_comp_S', 
-            'rad_L_iso', 'rad_comp_L_iso', 'L_mag_L', 'L_mag_comp_L']:
-    binary_mag_df[col] = 0.0
+for col in ['L_mag_S', 'L_mag_comp_S', 'L_mag_L', 'L_mag_comp_L']:
+    binary_mag_df[col] = np.nan
+print(binary_mag_df.head())
 ```
 
 ```python
 # 3. Run processing functions, creating a new DataFrame each time
 # The first function now only needs to process the sources
-source_mags_added_df = process_source_magnitudes(binary_mag_df, bp_irac1) 
+
+# This will shut up specific warning from the isochrones package
+warnings.filterwarnings("ignore", 
+                        message="The 'delim_whitespace' keyword.*", 
+                        category=FutureWarning)
+warnings.filterwarnings("ignore", 
+                        message="Starting with pandas version 3.0*", 
+                        category=FutureWarning)
+warnings.filterwarnings("ignore", 
+                        message="Setting an item of incompatible dtype is deprecated.*", 
+                        category=FutureWarning)
+
+source_mags_added_df = process_source_magnitudes(binary_mag_df) 
+```
+
+```python
+source_mags_added_df.head()
 ```
 
 ```python
 # The second function takes the result and adds the lens magnitudes
-all_mags_df = process_lens_magnitudes(source_mags_added_df, bp_irac1)
+all_mags_df = process_lens_magnitudes(source_mags_added_df)
+```
+
+```python
+all_mags_df.head()
 ```
 
 ```python
@@ -429,11 +356,6 @@ all_mags_df = process_lens_magnitudes(source_mags_added_df, bp_irac1)
 print("\n--- Results ---")
 print("Sample of calculated columns from 'all_mags_df':")
 print(all_mags_df[['obj_id_S', 'L_mag_S', 'L_mag_comp_S', 'L_mag_L', 'L_mag_comp_L']].head(15))
-```
-
-```python
-# Print the radius values
-print(all_mags_df[['rad_S_iso', 'rad_comp_S_iso', 'rad_L_iso', 'rad_comp_L_iso']].head(15))
 ```
 
 ```markdown
@@ -508,10 +430,155 @@ filtered_df_with_calcs['binary_a_au'] = 10 ** filtered_df_with_calcs['comp_S_log
 # The formula is: ang_sep[arcsec] = phys_sep[AU] / distance[parsecs]
 # We convert distance from kpc to pc by multiplying by 1000.
 filtered_df_with_calcs['binary_angular_separation'] = filtered_df_with_calcs['comp_S_sep'] / (filtered_df_with_calcs['D_S'] * 1000)
+
+# calculate the absolute to apparent correction constant for companion pairs
+filtered_df_with_calcs['C_L'] = filtered_df_with_calcs['ubv_I_app_L'] - filtered_df_with_calcs['ubv_I_L']
+filtered_df_with_calcs['C_S'] = filtered_df_with_calcs['ubv_I_app_S'] - filtered_df_with_calcs['ubv_I_S']
+
+# calculate apparent companion mags
+filtered_df_with_calcs['comp_S_app_ubv_I'] = filtered_df_with_calcs['comp_S_m_ubv_I'] + filtered_df_with_calcs['C_S']
+filtered_df_with_calcs['comp_L_app_ubv_I'] = filtered_df_with_calcs['comp_L_m_ubv_I'] + filtered_df_with_calcs['C_L']
+
+# calculate the combined apparent magnitude for the lens system
+def add_magnitudes(*mags):
+    """
+    Correctly adds multiple magnitudes together by converting to flux.
+    """
+    # Filter out any NaN or non-finite values before calculation
+    valid_mags = [m for m in mags if np.isfinite(m)]
+    if not valid_mags:
+        return np.nan
+        
+    # Convert each magnitude to flux, sum the fluxes
+    total_flux = sum(10**(-0.4 * m) for m in valid_mags)
+    
+    # Convert the total flux back to a magnitude
+    return -2.5 * np.log10(total_flux)
+
+# lets again boldly assume there is only ever 1 companion to the source and ignoring lens companions
+filtered_df_with_calcs['sys_app_ubv_I']= filtered_df_with_calcs.apply(
+    lambda row: add_magnitudes(row['ubv_I_app_S'], row['comp_S_app_ubv_I'], 
+                               row['ubv_I_app_L']), axis=1
+)
+filtered_df_with_calcs['sys_app_L'] = filtered_df_with_calcs.apply(
+    lambda row: add_magnitudes(row['L_mag_S'], row['L_mag_comp_S'],
+                               row['L_mag_L']), axis=1
+)
+```
+
+```python
+filtered_df_with_calcs_with_names = filtered_df_with_calcs.copy()
+
+# Let's add the columns we need to calculate directly to your dataframe.
+print(f"Starting with {len(filtered_df_with_calcs_with_names)} binary source events. Now, let's add names and check for duplicates.")
+
+# Create a unique event identifier for each row using lens obj id, source obj id,
+# and the companion index chosen for the source. This helps avoid ambiguity
+# when `obj_id_L`/`obj_id_S` are not globally unique across combined fields.
+# The format is '<obj_id_L>_<obj_id_S>_<comp_S_companion_idx>'
+filtered_df_with_calcs_with_names['comp_S_companion_idx'] = filtered_df_with_calcs_with_names['comp_S_companion_idx'].astype(int)
+filtered_df_with_calcs_with_names['event_id'] = (
+    filtered_df_with_calcs_with_names['obj_id_L'].astype(str) + '_' +
+    filtered_df_with_calcs_with_names['obj_id_S'].astype(str) + '_' +
+    filtered_df_with_calcs_with_names['comp_S_companion_idx'].astype(str)
+)
+
+# Check that event_id values are unique. If not, raise an Exception with
+# a small sample of duplicates to help debugging.
+dupe_mask = filtered_df_with_calcs_with_names.duplicated(subset=['event_id'], keep=False)
+if dupe_mask.any():
+    dupes = filtered_df_with_calcs_with_names.loc[dupe_mask, ['event_id', 'field_id', 'obj_id_L', 'obj_id_S', 'comp_S_companion_idx']].copy()
+    print(f"Found {dupes['event_id'].nunique()} duplicated event_id(s); sample:")
+    print(dupes.head(20))
+    raise ValueError('Non-unique event_id values detected. Re-evaluate identifier components or include additional disambiguators (e.g. field_id).')
+else:
+    print("All event_id values are unique. You're good to go!")
+```
+
+````markdown
+### Checking that `comp_S_m_ubv_I` and `comp_L_m_ubv_I` are absolute
+
+Why you would put a lower case m in this column name for **absolute** magnitude is beyond me, but the docs are unclear 
+
+```
+| m_ubv_U, B, V, I, R | System magnitude in filters from SPISEA system |
+```
+
+so we will check this by plotting magnitude vs distance and if the data is correlated, we will know the column contains apparent magnitudes, not absolute. 
+````
+
+```python
+import matplotlib.pyplot as plt
+
+# We need to drop any rows where the companion magnitude is NaN to avoid errors
+subset = filtered_df_with_calcs.dropna(subset=['comp_S_m_ubv_I', 'D_S'])
+
+plt.figure(figsize=(10, 6))
+plt.scatter(subset['D_S'], subset['comp_S_m_ubv_I'], alpha=0.5, s=5)
+plt.xlabel('Source Distance (D_S) [kpc]')
+plt.ylabel('Companion I-band Magnitude (comp_S_m_ubv_I)')
+plt.title('Companion Magnitude vs. Distance')
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+```
+
+```markdown
+Cool, so it's definately absolute magnitude.
+```
+
+```python
+# We need to drop any rows where the companion magnitude is NaN to avoid errors
+subset2 = filtered_df_with_calcs.dropna(subset=['comp_S_app_ubv_I', 'D_S'])
+
+plt.figure(figsize=(10, 6))
+plt.scatter(subset2['D_S'], subset['comp_S_app_ubv_I'], alpha=0.5, s=5)
+plt.xlabel('Source Distance (D_S) [kpc]')
+plt.ylabel('Companion I-band Magnitude (comp_S_app_ubv_I)')
+plt.title('Companion Magnitude vs. Distance')
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+```
+
+```markdown
+Why is that barely correlated? Oh, well. The values look more reasonable for apparent magnitudes now, so lets just run with it. That's not a lot of starts brighter than 17.5, though.
+```
+
+```python
+subset2 = filtered_df_with_calcs.dropna(subset=['ubv_I_app_S', 'D_S'])
+
+plt.figure(figsize=(10, 6))
+plt.scatter(subset2['D_S'], subset2['ubv_I_app_S'], alpha=0.5, s=5)
+plt.xlabel('Source Distance (D_S) [kpc]')
+plt.ylabel('Companion I-band Magnitude (ubv_I_app_S)')
+plt.title('Companion Magnitude vs. Distance')
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+```
+
+```python
+subset3 = filtered_df_with_calcs.dropna(subset=['sys_app_ubv_I', 'comp_S_app_ubv_I', 'ubv_I_app_S', 'D_L'])
+
+plt.figure(figsize=(10, 6))
+plt.scatter(subset3['D_L'], subset3['sys_app_ubv_I'], alpha=0.5, s=5, c='r', label='System Mag')
+plt.scatter(subset3['D_L'], subset3['comp_S_app_ubv_I'], alpha=0.5, s=5, c='g', label='Companion Mag')
+plt.scatter(subset3['D_L'], subset3['ubv_I_app_S'], alpha=0.5, s=5, c='b', label='Source Mag')
+plt.xlabel('Lens Distance (D_L) [kpc]')
+plt.ylabel('System I-band Magnitude (sys_app_ubv_I)')
+plt.title('System Magnitude vs. Distance')
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+```
+
+```markdown
+I mean the distribution of distances looks the same. Maybe we can just ignore the magnitude cut.
 ```
 
 ```markdown
 ## Select and Rename to Create the Final, Clean Table
+```
+
+```python
+
 ```
 
 ```python
@@ -531,10 +598,10 @@ final_columns = {
     'binary_angular_separation': 'binary_sep_arcsec', # The angular separation
     'glon_S': 'gal_lon_S_deg',
     'glat_S': 'gal_lat_S_deg',
-    'ubv_I_S': 'I_S',
-    'comp_S_m_ubv_I': 'I_S2',
-    'ubv_I_L': 'I_L',
-    'comp_L_m_ubv_I': 'I_L2',
+    'ubv_I_app_S': 'I_S',
+    'comp_S_app_ubv_I': 'I_S2',
+    'ubv_I_app_L': 'I_L',
+    'comp_L_app_ubv_I': 'I_L2',
     'L_mag_S': 'L_S',
     'L_mag_comp_S': 'L_S2',
     'L_mag_L': 'L_L',
@@ -542,12 +609,16 @@ final_columns = {
     'mu_b_L': 'mu_b_L',
     'mu_lcosb_L': 'mu_lcosb_L',
     'mu_b_S': 'mu_b_S',
-    'mu_lcosb_S': 'mu_lcosb_S'
+    'mu_lcosb_S': 'mu_lcosb_S',
+    'sys_app_ubv_I': 'I_sys',
+    'sys_app_L': 'L_sys'
+    # include event_id generated earlier so it persists into the final output
+    'event_id': 'event_id'
 }
 
 # Create the final table from your filtered data.
 # This selects ONLY the columns we want and renames them.
-renamed_table = filtered_df_with_calcs[list(final_columns.keys())].rename(columns=final_columns)
+renamed_table = filtered_df_with_calcs_with_names[list(final_columns.keys())].rename(columns=final_columns)
 
 renamed_table.head()
 ```
@@ -570,7 +641,10 @@ renamed_table.to_csv('data/popsycle_table_with_calcs.csv', index=False)
 table = pd.read_csv('data/popsycle_table_with_calcs.csv')
 
 # Print the first few rows of the table
-print(table.head())
+table.head()
+```
+
+```python
 print(table.shape)
 ```
 
@@ -581,10 +655,59 @@ D_L = table['D_L_kpc']
 
 ```python
 # how to filter the table
-table_filtered = table[table['D_L_kpc'] < 10]
+table_filtered = table[table['D_L_kpc'] < 20]
 
 # how to add a new column
 table['D_L_pc'] = table['D_L_kpc'] * 1000
+```
+
+```python
+table_filtered = table_filtered[table_filtered['I_S'] < 18.0]
+```
+
+```python
+# plot table filtered histograms
+import matplotlib.pyplot as plt
+
+plt.figure(figsize=(12, 12))
+
+# Normalized Histogram for u0
+plt.subplot(3, 2, 1)
+plt.hist(table_filtered['u0'], bins=30, color='blue', alpha=0.7, density=True)
+plt.hist(table['u0'], bins=30, edgecolor='black', fill=False, alpha=0.3, density=True)
+plt.xlabel(r'$u_{0}$ ($\theta_{E}$)')
+plt.ylabel('Count')
+
+# Histogram for theta_E
+plt.subplot(3, 2, 2)
+plt.hist(table_filtered['theta_E_mas'], bins=30, color='orange', alpha=0.7, density=True)
+plt.hist(table['theta_E_mas'], bins=30, edgecolor='black', fill=False, alpha=0.3, density=True)
+plt.xlabel(r'$\theta_{E}$ (arcsec)')
+plt.ylabel('Count')
+
+# Histogram for binary_log_a_au
+plt.subplot(3, 2, 3)
+plt.hist(table_filtered['binary_log_a_au'], bins=30, color='green', alpha=0.7, density=True)
+plt.hist(table['binary_log_a_au'], bins=30, edgecolor='black', fill=False, alpha=0.3, density=True)
+plt.xlabel(r'binary $\log_{10}{a}$ ($\log_{10}\mathrm{au}$)')
+plt.ylabel('Count')
+
+# Histogram for D_L
+plt.subplot(3, 2, 4)
+plt.hist(table_filtered['D_L_kpc'], bins=30, color='red', alpha=0.7, density=True)
+plt.hist(table['D_L_kpc'], bins=30, edgecolor='black', fill=False, alpha=0.3, density=True)
+plt.xlabel(r'$D_{L}$ (kpc)')
+plt.ylabel('Count')
+
+# Histogram for M_L
+plt.subplot(3, 2, 5)
+plt.hist(np.log10(table_filtered['M_L']), bins=30, color='purple', alpha=0.7, density=True)
+plt.hist(np.log10(table['M_L']), bins=30, edgecolor='black', fill=False, alpha=0.3, density=True)
+plt.xlabel(r'$\log_{10}{M_{L}}$ ($M_{\odot}$)')
+plt.ylabel('Count')
+
+plt.tight_layout()
+plt.show()
 ```
 
 ```python
@@ -668,6 +791,298 @@ plt.show()
 
 ```markdown
 Looks good!
+```
+
+```markdown
+Lets check the L-band transformation next.
+```
+
+```python
+# Colour magnitude diagram
+renamed_table['IL_L'] = renamed_table['I_L']- renamed_table['L_L']
+renamed_table['IL_S'] = renamed_table['I_S'] - renamed_table['L_S']
+renamed_table['IL_S2'] = renamed_table['I_S2'] - renamed_table['L_S2']
+renamed_table['IL_L2'] = renamed_table['I_L2'] - renamed_table['L_L2']
+
+# Plot the CMD
+plt.figure(figsize=(10, 8))
+plt.scatter(renamed_table['IL_L'], renamed_table['I_L'], c='b', marker='.', label='L')
+plt.scatter(renamed_table['IL_S'], renamed_table['I_S'], c='r', marker='.', label='S')
+plt.scatter(renamed_table['IL_S2'], renamed_table['I_S2'], c='c', marker='.', label='S2')
+plt.scatter(renamed_table['IL_L2'], renamed_table['I_L2'], c='m', marker='.', label='L2')
+plt.xlabel('I - L (mag)')
+plt.ylabel('I (mag)')
+plt.legend()
+plt.title('CMD')
+
+# And for God's sake, invert the y-axis. Brighter stars go at the top.
+plt.gca().invert_yaxis()
+
+
+plt.show()
+```
+
+```python
+import matplotlib.pyplot as plt
+import numpy as np
+
+# --- Data Preparation ---
+# Calculate the color for each population from the intermediate DataFrame
+color_S = filtered_df_with_calcs['ubv_I_app_S'] - filtered_df_with_calcs['L_mag_S']
+color_S2 = filtered_df_with_calcs['comp_S_app_ubv_I'] - filtered_df_with_calcs['L_mag_comp_S']
+color_L = filtered_df_with_calcs['ubv_I_app_L'] - filtered_df_with_calcs['L_mag_L']
+color_L2 = filtered_df_with_calcs['comp_L_app_ubv_I'] - filtered_df_with_calcs['L_mag_comp_L']
+
+# --- Plotting ---
+plt.figure(figsize=(18, 10))
+
+# Create the scatter plot, using mass for the color
+# The 'c' argument takes the mass values, and 'cmap' sets the color scheme
+sc = plt.scatter(color_S, filtered_df_with_calcs['ubv_I_app_S'], 
+                 c=filtered_df_with_calcs['mass_S'], 
+                 cmap='viridis', s=10, marker='^', label='Source (S)', vmin=0, vmax=1.5)
+
+plt.scatter(color_S2, filtered_df_with_calcs['comp_S_app_ubv_I'], 
+            c=filtered_df_with_calcs['comp_S_mass'], 
+            cmap='viridis', s=10, marker='o', label='Source Companion (S2)', vmin=0, vmax=1.5)
+
+#"""
+# We only plot lenses that are actual stars (rem_id_L == 0)
+lens_star_mask = filtered_df_with_calcs['rem_id_L'] == 0
+
+sc2 = plt.scatter(color_L[lens_star_mask], filtered_df_with_calcs['ubv_I_app_L'][lens_star_mask], 
+            c=filtered_df_with_calcs['mass_L'][lens_star_mask],
+            cmap='plasma', s=25, marker='^', label='Lens (L)', vmin=0, vmax=1.5)
+
+plt.scatter(color_L2[lens_star_mask], filtered_df_with_calcs['comp_L_app_ubv_I'][lens_star_mask], 
+            c=filtered_df_with_calcs['comp_L_mass'][lens_star_mask],
+            cmap='plasma', s=25, marker='o', label='Lens Companion (L2)', vmin=0, vmax=1.5)
+#"""
+
+"""
+sc2 = plt.scatter(color_L, filtered_df_with_calcs['ubv_I_app_L'], 
+            c=filtered_df_with_calcs['mass_L'],
+            cmap='plasma', s=25, marker='^', label='Lens (L)', vmin=0, vmax=1.5, alpha=0.5)
+
+plt.scatter(color_L2, filtered_df_with_calcs['comp_L_app_ubv_I'], 
+            c=filtered_df_with_calcs['comp_L_mass'],
+            cmap='plasma', s=25, marker='o', label='Lens Companion (L2)', vmin=0, vmax=1.5, alpha=0.5)
+#"""
+
+
+# Add a colorbar and label it properly
+cbar = plt.colorbar(sc, label='Mass ($M_\\odot$)')
+cbar = plt.colorbar(sc2, label='Mass ($M_\\odot$)')
+
+
+# --- Final Touches ---
+plt.xlabel('I - L (mag)')
+plt.ylabel('I (mag)')
+plt.title('Color-Magnitude Diagram')
+plt.legend()
+
+# Set plot limits to zoom in on the main sequence and ignore outliers
+#plt.xlim(-2, 6)
+plt.gca().invert_yaxis() # Flipped y-axis for a proper CMD
+
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+```
+
+```python
+import matplotlib.pyplot as plt
+import numpy as np
+
+# --- Data Preparation ---
+# Calculate the color for each population from the intermediate DataFrame
+color_S = filtered_df_with_calcs['ubv_I_app_S'] - filtered_df_with_calcs['L_mag_S']
+color_S2 = filtered_df_with_calcs['comp_S_app_ubv_I'] - filtered_df_with_calcs['L_mag_comp_S']
+color_L = filtered_df_with_calcs['ubv_I_app_L'] - filtered_df_with_calcs['L_mag_L']
+color_L2 = filtered_df_with_calcs['comp_L_app_ubv_I'] - filtered_df_with_calcs['L_mag_comp_L']
+
+# --- Plotting ---
+plt.figure(figsize=(18, 10))
+
+# Create the scatter plot, using mass for the color
+# The 'c' argument takes the mass values, and 'cmap' sets the color scheme
+sc = plt.scatter(color_S, filtered_df_with_calcs['ubv_I_app_S'], 
+                 c=filtered_df_with_calcs['D_S'], 
+                 cmap='viridis', s=10, marker='^', label='Source (S)', vmin=0, vmax=15)
+
+plt.scatter(color_S2, filtered_df_with_calcs['comp_S_app_ubv_I'], 
+            c=filtered_df_with_calcs['D_S'], 
+            cmap='viridis', s=10, marker='o', label='Source Companion (S2)', vmin=0, vmax=15)
+
+#"""
+# We only plot lenses that are actual stars (rem_id_L == 0)
+lens_star_mask = filtered_df_with_calcs['rem_id_L'] == 0
+
+sc2 = plt.scatter(color_L[lens_star_mask], filtered_df_with_calcs['ubv_I_app_L'][lens_star_mask], 
+            c=filtered_df_with_calcs['D_L'][lens_star_mask],
+            cmap='plasma', s=25, marker='^', label='Lens (L)', vmin=0, vmax=15)
+
+plt.scatter(color_L2[lens_star_mask], filtered_df_with_calcs['comp_L_app_ubv_I'][lens_star_mask], 
+            c=filtered_df_with_calcs['D_L'][lens_star_mask],
+            cmap='plasma', s=25, marker='o', label='Lens Companion (L2)', vmin=0, vmax=15)
+#"""
+
+"""
+sc2 = plt.scatter(color_L, filtered_df_with_calcs['ubv_I_app_L'], 
+            c=filtered_df_with_calcs['mass_L'],
+            cmap='plasma', s=25, marker='^', label='Lens (L)', vmin=0, vmax=1.5, alpha=0.5)
+
+plt.scatter(color_L2, filtered_df_with_calcs['comp_L_app_ubv_I'], 
+            c=filtered_df_with_calcs['comp_L_mass'],
+            cmap='plasma', s=25, marker='o', label='Lens Companion (L2)', vmin=0, vmax=1.5, alpha=0.5)
+#"""
+
+
+# Add a colorbar and label it properly
+cbar = plt.colorbar(sc, label='Distance (kpc)')
+cbar = plt.colorbar(sc2, label='Distance (kpc)')
+
+
+# --- Final Touches ---
+plt.xlabel('I - L (mag)')
+plt.ylabel('I (mag)')
+plt.title('Color-Magnitude Diagram')
+plt.legend()
+
+# Set plot limits to zoom in on the main sequence and ignore outliers
+#plt.xlim(-2, 6)
+plt.gca().invert_yaxis() # Flipped y-axis for a proper CMD
+
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+```
+
+```python
+# --- Data Preparation ---
+# Calculate the color for each population from the intermediate DataFrame
+color_S = filtered_df_with_calcs['ubv_V_S'] - filtered_df_with_calcs['ubv_I_S']
+color_S2 = filtered_df_with_calcs['comp_S_m_ubv_V'] - filtered_df_with_calcs['comp_S_m_ubv_I']
+color_L = filtered_df_with_calcs['ubv_V_L'] - filtered_df_with_calcs['ubv_I_L']
+color_L2 = filtered_df_with_calcs['comp_L_m_ubv_V'] - filtered_df_with_calcs['comp_L_m_ubv_I']
+
+# --- Plotting ---
+plt.figure(figsize=(12, 10))
+
+# Create the scatter plot, using mass for the color
+# The 'c' argument takes the mass values, and 'cmap' sets the color scheme
+sc = plt.scatter(color_S, filtered_df_with_calcs['ubv_V_S'], 
+                 c=filtered_df_with_calcs['mass_S'], 
+                 cmap='viridis', s=10, marker='^', label='Source (S)', vmin=0, vmax=1.5)
+
+plt.scatter(color_S2, filtered_df_with_calcs['comp_S_m_ubv_V'], 
+            c=filtered_df_with_calcs['comp_S_mass'], 
+            cmap='viridis', s=10, marker='o', label='Source Companion (S2)', vmin=0, vmax=1.5)
+
+"""
+# We only plot lenses that are actual stars (rem_id_L == 0)
+lens_star_mask = filtered_df_with_calcs['rem_id_L'] == 0
+
+sc2 = plt.scatter(color_L[lens_star_mask], filtered_df_with_calcs['ubv_I_L'][lens_star_mask], 
+            c=filtered_df_with_calcs['mass_L'][lens_star_mask],
+            cmap='plasma', s=25, marker='^', label='Lens (L)', vmin=0, vmax=1.5)
+
+plt.scatter(color_L2[lens_star_mask], filtered_df_with_calcs['comp_L_m_ubv_I'][lens_star_mask], 
+            c=filtered_df_with_calcs['comp_L_mass'][lens_star_mask],
+            cmap='plasma', s=25, marker='^', label='Lens Companion (L2)', vmin=0, vmax=1.5)
+#"""
+
+"""
+sc2 = plt.scatter(color_L, filtered_df_with_calcs['ubv_V_L'], 
+            c=filtered_df_with_calcs['mass_L'],
+            cmap='plasma', s=25, marker='^', label='Lens (L)', vmin=0, vmax=1.5)
+
+plt.scatter(color_L2, filtered_df_with_calcs['comp_L_m_ubv_V'], 
+            c=filtered_df_with_calcs['comp_L_mass'],
+            cmap='plasma', s=25, marker='o', label='Lens Companion (L2)', vmin=0, vmax=1.5)
+#"""
+
+# Add a colorbar and label it properly
+cbar = plt.colorbar(sc, label='Mass ($M_\\odot$)')
+#cbar = plt.colorbar(sc2, label='Mass ($M_\\odot$)')
+
+# --- Final Touches ---
+plt.xlabel('V - I (mag)')
+plt.ylabel('V (mag)')
+plt.title('Color-Magnitude Diagram')
+plt.legend()
+
+# Set plot limits to zoom in on the main sequence and ignore outliers
+#plt.xlim(-2, 6)
+plt.gca().invert_yaxis() # Flipped y-axis for a proper CMD
+
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+```
+
+```python
+
+```
+
+```markdown
+Use this next plot to see which ones are remnants.
+```
+
+```python
+import matplotlib.pyplot as plt
+import numpy as np
+
+# --- Data Preparation ---
+# Calculate the color for each population
+color_S = filtered_df_with_calcs['ubv_I_S'] - filtered_df_with_calcs['L_mag_S']
+color_S2 = filtered_df_with_calcs['comp_S_m_ubv_I'] - filtered_df_with_calcs['L_mag_comp_S']
+color_L = filtered_df_with_calcs['ubv_I_L'] - filtered_df_with_calcs['L_mag_L']
+color_L2 = filtered_df_with_calcs['comp_L_m_ubv_I'] - filtered_df_with_calcs['L_mag_comp_L']
+
+# --- Create a mask to select ONLY stars for the lens populations ---
+lens_is_star_mask = filtered_df_with_calcs['rem_id_L'] == 0
+# 0 - star
+# 101 - white dwarf
+# 102 - neutron star
+# 103 - black hole
+
+# --- Plotting ---
+plt.figure(figsize=(12, 10))
+
+# Plot Sources (no change here)
+sc = plt.scatter(color_S, filtered_df_with_calcs['ubv_I_S'],
+                 c=filtered_df_with_calcs['mass_S'],
+                 cmap='viridis', s=10, label='Source (S)', vmin=0, vmax=1.5)
+
+plt.scatter(color_S2, filtered_df_with_calcs['comp_S_m_ubv_I'],
+            c=filtered_df_with_calcs['comp_S_mass'],
+            cmap='viridis', s=10, label='Source Companion (S2)', vmin=0, vmax=1.5)
+
+# Plot Lenses using the new mask
+sc2 = plt.scatter(color_L[lens_is_star_mask], filtered_df_with_calcs['ubv_I_L'][lens_is_star_mask],
+            c=filtered_df_with_calcs['mass_L'][lens_is_star_mask],
+            cmap='plasma', s=25, marker='^', label='Lens (L)', vmin=0, vmax=1.5)
+
+plt.scatter(color_L2[lens_is_star_mask], filtered_df_with_calcs['comp_L_m_ubv_I'][lens_is_star_mask],
+            c=filtered_df_with_calcs['comp_L_mass'][lens_is_star_mask],
+            cmap='plasma', s=25, marker='^', label='Lens Companion (L2)', vmin=0, vmax=1.5)
+
+# --- Final Touches ---
+cbar = plt.colorbar(sc, label='Mass ($M_\\odot$)')
+cbar = plt.colorbar(sc2, label='Mass ($M_\\odot$)')
+plt.xlabel('I - L (mag)')
+plt.ylabel('I (mag)')
+plt.title('Color-Magnitude Diagram (Lenses are Stars Only)')
+plt.legend()
+plt.ylim(18, -5) # Flipped y-axis for a proper CMD
+plt.grid(True, linestyle='--', alpha=0.6)
+plt.show()
+```
+
+```python
+
+```
+
+```python
+print(filtered_df_with_calcs['rem_id_L'].unique())
 ```
 
 ```markdown

@@ -10,5 +10,7 @@ dependencies:
   - matplotlib
   - pandas
   - ipykernel
+  - lxml
+  - numba
   - pip:
     - isochrones
