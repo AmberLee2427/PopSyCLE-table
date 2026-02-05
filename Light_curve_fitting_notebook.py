@@ -80,6 +80,7 @@ def OGLE_flux_error(F):
     sig = [0.166425, 3.120069]
     m, b = normal(mean, sig)
     y = m * sqrtF + b
+    y = np.maximum(y, 1e-10)  # Ensure y is not less than 1e-10 to avoid division by zero or negative noise
     #print(y)
 
     sig2 = F/y
@@ -465,9 +466,9 @@ dbbinary = 0.5
 dt = 0.5
 
 # Checking the binary_source functions
-FS1 = 70.0
-FS2 = 50.0
-FB = 10.0
+FS1 = 1000.0
+FS2 = 5000.0
+FB = 100.0
 theta = np.array([t0, u0, tE, t0+dt, u0+dbbinary, tE])  # initial guess for parameters
 
 trange = (t0-82, t0+70)
@@ -1931,3 +1932,5 @@ print(real_data_array.shape)
 
 #print(len(real_data_array))
 #print(real_data_array.shape)
+
+print("\n\nDONE\n")
